@@ -1,0 +1,97 @@
+name: Build MobileShell
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - id: detect-sdk
+        name: Detect installed Windows 10 SDK version
+        shell: powershell
+        run: |
+          $sdkRoot = 'C:\Program Files (x86)\Windows Kits\10\Include'
+          $winsdk = ''
+          if (Test-Path $sdkRoot) {
+            $versions = Get-ChildItem $sdkRoot -Directory | Select-Object -ExpandProperty Name | Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' }
+            if ($versions) {
+              $best = $versions | Sort-Object {[version]$_} -Descending | Select-Object -First 1
+              Write-Host "Detected Windows SDK: $best"
+              $winsdk = $best
+            } else {
+              Write-Host "No SDK versions found in $sdkRoot"
+            }
+          } else {
+            Write-Host "Windows Kits folder not present: $sdkRoot"
+          }
+
+          # export as step output and as env for later steps
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "winsdk=$winsdk"
+          Add-Content -Path $env:GITHUB_ENV -Value "WINSDK=$winsdk"
+
+      - name: Show detected SDK (debug)
+        shell: powershell
+        run: |
+          Write-Host "Detected WINSDK (env): $env:WINSDK"
+          Write-Host "Detected WINSDK (step output): ${{ steps.detect-sdk.outputs.winsdk }}"
+
+      - name: Install required VS Components (fallback)
+        if: ${{ steps.detect-sdk.outputs.winsdk == '' }}
+        shell: powershell
+        run: |
+          Write-Host "No Windows SDK detected — installing UWP workload + Windows 10 SDK 10.0.19041.0"
+          & 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vs_installer.exe' modify `
+            --installPath 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise' `
+            --add Microsoft.VisualStudio.Workload.Universal `
+            --add Microsoft.VisualStudio.Component.Windows10SDK.19041 `
+            --add Microsoft.VisualStudio.Component.VC.Tools.UWP `
+            --quiet --norestart --wait
+
+          # re-detect and export again
+          $sdkRoot = 'C:\Program Files (x86)\Windows Kits\10\Include'
+          $winsdk = ''
+          if (Test-Path $sdkRoot) {
+            $versions = Get-ChildItem $sdkRoot -Directory | Select-Object -ExpandProperty Name | Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' }
+            if ($versions) {
+              $best = $versions | Sort-Object {[version]$_} -Descending | Select-Object -First 1
+              Write-Host "After install detected Windows SDK: $best"
+              $winsdk = $best
+            } else {
+              Write-Host "Still no SDK versions found after install"
+            }
+          } else {
+            Write-Host "Windows Kits folder still missing after install"
+          }
+
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "winsdk=$winsdk"
+          Add-Content -Path $env:GITHUB_ENV -Value "WINSDK=$winsdk"
+
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v1
+        with:
+          nuget-version: 'latest'
+
+      - name: Restore and Build
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          set SDK=%WINSDK%
+          if "%SDK%"=="" set SDK=10.0.19041.0
+          echo Using Windows SDK: %SDK%
+          nuget restore src/MobileShellPlus.sln
+          msbuild.exe src/MobileShellPlus.sln /p:Configuration=Release /p:Platform=x64 /p:RestorePackages=false /p:WindowsTargetPlatformVersion=%SDK% /p:TargetPlatformVersion=%SDK% /m /p:AppxPackageSigningEnabled=false
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MobileShell-Build
+          # Note: Adjust path if Release output is not directly under MobileShellPackaging/bin/x64/Release/
+          # For example, it might be in an AppPackages subfolder or similar. Check your build output locally.
+          path: src/MobileShellPackaging/bin/x64/Release/
